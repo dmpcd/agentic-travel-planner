@@ -1,6 +1,9 @@
 """
 Orchestrator Agent
 The master coordinator that manages the entire trip planning process.
+
+NOW POWERED BY LANGGRAPH! 🎉
+This orchestrator uses LangGraph for intelligent workflow management.
 """
 from typing import Any, Dict
 from datetime import datetime
@@ -10,10 +13,8 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).parent.parent.parent))
 
 from src.agents.base_agent import BaseAgent
-from src.agents.flight_agent import FlightAgent
-from src.agents.hotel_agent import HotelAgent
-from src.agents.activity_agent import ActivityAgent
-from src.agents.budget_agent import BudgetAgent
+from src.agents.travel_graph import travel_planning_app, plan_trip
+from src.agents.state import create_initial_state
 from src.models.travel_request import TravelRequest
 
 
@@ -21,25 +22,31 @@ class OrchestratorAgent(BaseAgent):
     """
     The master coordinator agent that manages the entire trip planning process.
     
+    NOW USING LANGGRAPH for workflow orchestration!
+    
     Responsibilities:
     1. Parse and understand user requests
-    2. Delegate tasks to specialized agents
-    3. Collect and combine results
-    4. Resolve conflicts between agent outputs
-    5. Generate final travel plan
+    2. Create initial state for the graph
+    3. Execute the LangGraph workflow
+    4. Return formatted results
+    
+    The actual orchestration is now handled by the LangGraph workflow,
+    which provides:
+    - Automatic state management
+    - Conditional routing (budget optimization)
+    - Better error handling
+    - Visual workflow representation
+    - Potential for parallel execution
     """
     
     def __init__(self):
         super().__init__(
-            name="Travel Orchestrator",
-            description="Coordinates all agents to plan the perfect trip"
+            name="Travel Orchestrator (LangGraph)",
+            description="Coordinates all agents using LangGraph workflow"
         )
         
-        # Initialize all specialized agents
-        self.flight_agent = FlightAgent()
-        self.hotel_agent = HotelAgent()
-        self.activity_agent = ActivityAgent()
-        self.budget_agent = BudgetAgent()
+        # Reference to the compiled LangGraph application
+        self.graph = travel_planning_app
     
     @property
     def system_prompt(self) -> str:
@@ -62,20 +69,26 @@ Keep your summary engaging and concise (5-7 sentences)."""
 
     async def execute(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Execute the full trip planning workflow.
+        Execute the full trip planning workflow using LangGraph.
         
         Input: TravelRequest data
         Output: Complete trip plan with all recommendations
+        
+        This now delegates to the LangGraph workflow which handles:
+        - Sequential execution of search agents
+        - Budget analysis and optimization
+        - Conditional routing (retry with cheaper options if over budget)
+        - Final summary generation
         """
         print("\n" + "=" * 70)
-        print("STARTING TRIP PLANNING PROCESS")
+        print("🌍 LANGGRAPH TRAVEL ORCHESTRATOR")
         print("=" * 70)
         
-        # Parse the request
+        # Parse the request to show summary
         request = TravelRequest(**input_data)
         days = (request.return_date - request.departure_date).days
         
-        print(f"\nTrip Details:")
+        print(f"\n📋 Trip Request:")
         print(f"   From: {request.origin}")
         print(f"   To: {request.destination}")
         print(f"   Dates: {request.departure_date} to {request.return_date} ({days} days)")
@@ -83,105 +96,44 @@ Keep your summary engaging and concise (5-7 sentences)."""
         print(f"   Budget: ${request.budget:,.2f}" if request.budget else "   Budget: Flexible")
         print(f"   Interests: {', '.join(request.interests)}" if request.interests else "")
         
-        # Step 1: Search for flights
         print("\n" + "-" * 70)
-        print("STEP 1: Searching for flights...")
-        print("-" * 70)
-        flight_results = await self.flight_agent.execute({
-            "origin": request.origin,
-            "destination": request.destination,
-            "departure_date": str(request.departure_date),
-            "return_date": str(request.return_date),
-            "travelers": request.travelers,
-            "max_price": request.budget * 0.4 / request.travelers if request.budget else None,
-            "preferences": request.flight_preferences
-        })
-        print(f"Found {flight_results['total_flights_found']} flight options")
-        
-        # Step 2: Search for hotels
-        print("\n" + "-" * 70)
-        print("STEP 2: Searching for hotels...")
-        print("-" * 70)
-        hotel_results = await self.hotel_agent.execute({
-            "destination": request.destination,
-            "check_in": str(request.departure_date),
-            "check_out": str(request.return_date),
-            "guests": request.travelers,
-            "max_price_per_night": (request.budget * 0.35 / days) if request.budget else None,
-            "preferences": request.hotel_preferences
-        })
-        print(f"Found {hotel_results['total_found']} hotel options")
-        
-        # Step 3: Find activities
-        print("\n" + "-" * 70)
-        print("STEP 3: Finding activities...")
-        print("-" * 70)
-        activity_results = await self.activity_agent.execute({
-            "destination": request.destination,
-            "interests": request.interests,
-            "days": days,
-            "budget": request.budget * 0.15 if request.budget else None
-        })
-        print(f"Found {activity_results['total_found']} activity options")
-        
-        # Step 4: Budget optimization
-        print("\n" + "-" * 70)
-        print("STEP 4: Optimizing budget...")
-        print("-" * 70)
-        budget_results = await self.budget_agent.execute({
-            "flights": flight_results,
-            "hotels": hotel_results,
-            "activities": activity_results,
-            "total_budget": request.budget,
-            "travelers": request.travelers,
-            "days": days
-        })
-        print(f"Total cost: ${budget_results['total_cost']:,.2f}")
-        if request.budget:
-            status = "Within budget" if budget_results['within_budget'] else "Over budget"
-            print(f"   {status}")
-        
-        # Step 5: Generate final summary
-        print("\n" + "-" * 70)
-        print("STEP 5: Generating travel plan summary...")
+        print("🚀 Executing LangGraph workflow...")
         print("-" * 70)
         
-        summary_prompt = f"""Create an engaging trip summary for this travel plan:
-
-DESTINATION: {request.destination}
-DURATION: {days} days
-TRAVELERS: {request.travelers}
-
-SELECTED OPTIONS:
-Flights: ${budget_results['breakdown']['flights']:,.2f}
-Hotel: {hotel_results['recommended']['name']} - ${hotel_results['recommended']['price_per_night']}/night
-Activities: {len(activity_results['recommended'])} curated experiences
-Total: ${budget_results['total_cost']:,.2f}
-
-USER INTERESTS: {', '.join(request.interests) if request.interests else 'General tourism'}
-
-Create an exciting 5-7 sentence summary that highlights why this is a perfect trip plan."""
+        # Create initial state from input
+        initial_state = create_initial_state(input_data)
         
-        final_summary = await self.think(summary_prompt)
+        # Execute the graph! This is where all the magic happens
+        final_state = await self.graph.ainvoke(initial_state)
         
         print("\n" + "=" * 70)
-        print("TRIP PLANNING COMPLETE!")
+        print("✓ LANGGRAPH EXECUTION COMPLETE!")
         print("=" * 70)
         
+        # Format the output to match the old orchestrator's return format
+        # This ensures backward compatibility with any existing API consumers
         return {
-            "trip_summary": final_summary,
-            "destination": request.destination,
+            "trip_summary": final_state["trip_summary"],
+            "destination": final_state["destination"],
             "dates": {
-                "departure": str(request.departure_date),
-                "return": str(request.return_date),
-                "duration_days": days
+                "departure": final_state["departure_date"],
+                "return": final_state["return_date"],
+                "duration_days": final_state["days"]
             },
-            "travelers": request.travelers,
-            "flights": flight_results,
-            "hotels": hotel_results,
-            "activities": activity_results,
-            "budget": budget_results,
-            "created_at": datetime.now().isoformat()
+            "travelers": final_state["travelers"],
+            "flights": final_state["flights"],
+            "hotels": final_state["hotels"],
+            "activities": final_state["activities"],
+            "budget": final_state["budget_analysis"],
+            "created_at": final_state["created_at"],
+            
+            # Additional LangGraph-specific metadata
+            "langgraph_metadata": {
+                "optimization_iterations": final_state["optimization_iteration"],
+                "within_budget": final_state["within_budget"],
+                "total_cost": final_state["total_cost"],
+                "errors": final_state["errors"]
+            }
         }
 
 
