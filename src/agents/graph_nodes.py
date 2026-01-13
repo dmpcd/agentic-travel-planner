@@ -2,54 +2,279 @@
 LangGraph Node Functions
 Each function is a node in the travel planning workflow graph.
 Nodes receive state, execute their task, and return updated state.
-"""
-from typing import Dict, Any
-import sys
-from pathlib import Path
 
-sys.path.append(str(Path(__file__).parent.parent.parent))
+This file contains ALL the agent logic directly in the node functions,
+eliminating the need for separate agent class files.
+"""
+from typing import Dict, Any, List
+import os
+from dotenv import load_dotenv
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import HumanMessage, SystemMessage
 
 from src.agents.state import TravelPlanState
-from src.agents.flight_agent import FlightAgent
-from src.agents.hotel_agent import HotelAgent
-from src.agents.activity_agent import ActivityAgent
-from src.agents.budget_agent import BudgetAgent
-from src.agents.base_agent import BaseAgent
+from src.tools.flight_search import FlightSearchTool
+from src.tools.hotel_search import HotelSearchTool
+from src.tools.activity_search import ActivitySearchTool
+from src.models.flight import Flight
+from src.models.hotel import Hotel
+from src.models.activity import Activity
+
+# Load environment variables
+load_dotenv()
 
 
 # ============================================
-# SEARCH NODES - Parallel execution possible
+# LLM HELPER - Shared across all nodes
+# ============================================
+
+def get_llm(temperature: float = 0.7) -> ChatOpenAI:
+    """Get a configured LLM instance using Perplexity API"""
+    api_key = os.getenv("PERPLEXITY_API_KEY")
+    if not api_key:
+        raise ValueError("PERPLEXITY_API_KEY not found in .env file!")
+    
+    return ChatOpenAI(
+        model="sonar",
+        temperature=temperature,
+        openai_api_key=api_key,
+        openai_api_base="https://api.perplexity.ai"
+    )
+
+
+async def think(system_prompt: str, user_message: str) -> str:
+    """
+    Send a message to the LLM and get a response.
+    This is the shared "thinking" capability for all nodes.
+    
+    Args:
+        system_prompt: The system instructions for the LLM
+        user_message: The question or task for the LLM
+        
+    Returns:
+        The LLM's response as a string
+    """
+    llm = get_llm()
+    messages = [
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=user_message)
+    ]
+    response = await llm.ainvoke(messages)
+    return response.content
+
+
+# ============================================
+# SYSTEM PROMPTS - Define agent behaviors
+# ============================================
+
+FLIGHT_SYSTEM_PROMPT = """You are a flight search expert agent. Your job is to:
+
+1. Analyze flight options considering:
+   - Price (lower is better, but consider value)
+   - Duration (shorter is better)
+   - Number of stops (direct is strongly preferred)
+   - Departure/arrival times (reasonable hours preferred)
+   - Airline reputation
+
+2. Recommend the BEST option with clear reasoning
+
+3. Consider trade-offs intelligently:
+   - A slightly more expensive direct flight is usually better than a cheap flight with 2 stops
+   - Very early morning or late night flights should be noted
+   - Long layovers should be mentioned
+
+4. Keep your response concise and actionable (3-5 sentences max)
+
+5. Format: 
+   - State your recommendation clearly
+   - Give 2-3 key reasons
+   - Mention any important considerations"""
+
+HOTEL_SYSTEM_PROMPT = """You are a hotel recommendation expert. Analyze hotel options considering:
+
+1. Location (closer to city center is better)
+2. Rating (user reviews are important)
+3. Value for money (balance price with quality)
+4. Amenities (what's included)
+5. Star rating (hotel class)
+
+Recommend the BEST hotel with clear reasoning. Consider:
+- Budget travelers prefer good value
+- Luxury travelers want premium experience
+- Location is crucial for tourism
+
+Keep response concise (3-5 sentences). State your recommendation and key reasons."""
+
+ACTIVITY_SYSTEM_PROMPT = """You are an activity recommendation expert. Consider:
+
+1. User interests (match activities to what they love)
+2. Mix of free and paid activities
+3. Variety (culture, food, sightseeing, entertainment)
+4. Timing (group by location/area)
+5. Value for money
+
+Recommend a diverse mix of activities. For a multi-day trip:
+- Include must-see attractions
+- Mix famous spots with hidden gems
+- Consider pacing (not too rushed)
+- Group nearby activities together
+
+Keep response concise but exciting. Highlight why each activity is special."""
+
+BUDGET_SYSTEM_PROMPT = """You are a budget optimization expert. Your job is to:
+
+1. Calculate total trip costs accurately
+2. Ensure everything fits within budget
+3. Suggest cost-saving alternatives when needed
+4. Provide clear budget breakdown
+
+When analyzing costs:
+- Be realistic about hidden costs (meals, transport, tips)
+- Suggest where to save if over budget
+- Highlight good value options
+- Consider the full trip cost
+
+Keep response concise and actionable."""
+
+SUMMARY_SYSTEM_PROMPT = """You are the master travel planning orchestrator. Your job is to:
+
+1. Combine all recommendations into a cohesive travel plan
+
+2. Create a compelling summary that includes:
+   - Overview of the trip
+   - Key highlights
+   - Why this plan is perfect for the traveler
+
+Keep your summary engaging and concise (5-7 sentences)."""
+
+
+# ============================================
+# HELPER FUNCTIONS - Format data for AI
+# ============================================
+
+def format_flights(flights: List[Flight]) -> str:
+    """Format flights for AI analysis"""
+    if not flights:
+        return "No flights found"
+    
+    result = []
+    for i, flight in enumerate(flights[:5], 1):
+        airline = flight.segments[0].airline
+        result.append(
+            f"Option {i}: {flight.id}\n"
+            f"  - Price: {flight.formatted_price}\n"
+            f"  - Duration: {flight.formatted_duration}\n"
+            f"  - Stops: {flight.stops} ({'Direct' if flight.is_direct else 'Connecting'})\n"
+            f"  - Airline: {airline}"
+        )
+    return "\n\n".join(result)
+
+
+def format_hotels(hotels: List[Hotel]) -> str:
+    """Format hotels for AI analysis"""
+    if not hotels:
+        return "No hotels found"
+    
+    result = []
+    for i, hotel in enumerate(hotels[:5], 1):
+        result.append(
+            f"Hotel {i}: {hotel.name}\n"
+            f"  - Rating: {hotel.user_rating}/10 ({hotel.rating_category})\n"
+            f"  - Price: {hotel.formatted_price}\n"
+            f"  - Stars: {hotel.star_rating}⭐\n"
+            f"  - Distance: {hotel.distance_to_center_km}km from center\n"
+            f"  - Amenities: {', '.join(hotel.amenities[:4])}"
+        )
+    return "\n\n".join(result)
+
+
+def format_activities(activities: List[Activity]) -> str:
+    """Format activities for AI analysis"""
+    if not activities:
+        return "No activities found"
+    
+    result = []
+    for i, activity in enumerate(activities[:15], 1):
+        result.append(
+            f"{i}. {activity.name}\n"
+            f"   - Category: {activity.category.value}\n"
+            f"   - Price: {activity.formatted_price}\n"
+            f"   - Duration: {activity.formatted_duration}\n"
+            f"   - Rating: {activity.rating}⭐"
+        )
+    return "\n\n".join(result)
+
+
+# ============================================
+# SEARCH NODES
 # ============================================
 
 async def flight_search_node(state: TravelPlanState) -> Dict[str, Any]:
     """
     Node: Search for flights
     
-    Executes FlightAgent to find and recommend flights.
-    Updates state with flight options and recommendations.
+    Searches for flights and uses AI to recommend the best options.
     """
     print("\n" + "=" * 70)
     print("🛫 GRAPH NODE: Searching for flights...")
     print("=" * 70)
     
     try:
-        agent = FlightAgent()
+        flight_tool = FlightSearchTool()
         
-        results = await agent.execute({
-            "origin": state["origin"],
-            "destination": state["destination"],
-            "departure_date": state["departure_date"],
-            "return_date": state["return_date"],
-            "travelers": state["travelers"],
-            "max_price": (state["budget"] * 0.4 / state["travelers"]) if state.get("budget") else None,
-            "preferences": state.get("flight_preferences")
-        })
+        # Calculate max price based on budget allocation (40% for flights)
+        max_price = None
+        if state.get("budget"):
+            max_price = state["budget"] * 0.4 / state["travelers"]
+        
+        # Search for outbound flights
+        outbound_flights = await flight_tool.search(
+            origin=state["origin"],
+            destination=state["destination"],
+            date=state["departure_date"],
+            travelers=state["travelers"],
+            max_price=max_price
+        )
+        
+        # Search for return flights
+        return_flights = await flight_tool.search(
+            origin=state["destination"],
+            destination=state["origin"],
+            date=state["return_date"],
+            travelers=state["travelers"],
+            max_price=max_price
+        )
+        
+        # Use AI to analyze and recommend
+        analysis_prompt = f"""Analyze these flight options and recommend the best choice:
+
+OUTBOUND FLIGHTS ({state["origin"]} → {state["destination"]}):
+{format_flights(outbound_flights)}
+
+RETURN FLIGHTS ({state["destination"]} → {state["origin"]}):
+{format_flights(return_flights)}
+
+USER PREFERENCES:
+- Budget: ${max_price or 'flexible'} per person
+- Travelers: {state["travelers"]}
+- Preferences: {state.get('flight_preferences', 'none specified')}
+
+Recommend the BEST outbound and return flight combination. Be specific and concise."""
+        
+        reasoning = await think(FLIGHT_SYSTEM_PROMPT, analysis_prompt)
+        
+        results = {
+            "outbound_flights": [f.model_dump() for f in outbound_flights],
+            "return_flights": [f.model_dump() for f in return_flights],
+            "recommended_outbound": outbound_flights[0].model_dump() if outbound_flights else None,
+            "recommended_return": return_flights[0].model_dump() if return_flights else None,
+            "reasoning": reasoning,
+            "total_flights_found": len(outbound_flights) + len(return_flights)
+        }
         
         print(f"✓ Found {results['total_flights_found']} flight options")
         
-        return {
-            "flights": results
-        }
+        return {"flights": results}
         
     except Exception as e:
         print(f"✗ Error in flight search: {str(e)}")
@@ -63,30 +288,53 @@ async def hotel_search_node(state: TravelPlanState) -> Dict[str, Any]:
     """
     Node: Search for hotels
     
-    Executes HotelAgent to find and recommend accommodations.
-    Updates state with hotel options and recommendations.
+    Searches for hotels and uses AI to recommend the best option.
     """
     print("\n" + "=" * 70)
     print("🏨 GRAPH NODE: Searching for hotels...")
     print("=" * 70)
     
     try:
-        agent = HotelAgent()
+        hotel_tool = HotelSearchTool()
         
-        results = await agent.execute({
-            "destination": state["destination"],
-            "check_in": state["departure_date"],
-            "check_out": state["return_date"],
-            "guests": state["travelers"],
-            "max_price_per_night": (state["budget"] * 0.35 / state["days"]) if state.get("budget") else None,
-            "preferences": state.get("hotel_preferences")
-        })
+        # Calculate max price based on budget allocation (35% for hotels)
+        max_price_per_night = None
+        if state.get("budget"):
+            max_price_per_night = state["budget"] * 0.35 / state["days"]
+        
+        # Search for hotels
+        hotels = await hotel_tool.search(
+            destination=state["destination"],
+            check_in=state["departure_date"],
+            check_out=state["return_date"],
+            guests=state["travelers"],
+            max_price_per_night=max_price_per_night
+        )
+        
+        # AI analysis
+        analysis_prompt = f"""Analyze these hotel options in {state["destination"]}:
+
+{format_hotels(hotels)}
+
+USER REQUIREMENTS:
+- Guests: {state["travelers"]}
+- Budget: ${max_price_per_night or 'flexible'} per night
+- Preferences: {state.get('hotel_preferences', 'none specified')}
+
+Recommend the BEST hotel. Be specific and concise."""
+        
+        reasoning = await think(HOTEL_SYSTEM_PROMPT, analysis_prompt)
+        
+        results = {
+            "hotels": [h.model_dump() for h in hotels],
+            "recommended": hotels[0].model_dump() if hotels else None,
+            "reasoning": reasoning,
+            "total_found": len(hotels)
+        }
         
         print(f"✓ Found {results['total_found']} hotel options")
         
-        return {
-            "hotels": results
-        }
+        return {"hotels": results}
         
     except Exception as e:
         print(f"✗ Error in hotel search: {str(e)}")
@@ -100,28 +348,54 @@ async def activity_search_node(state: TravelPlanState) -> Dict[str, Any]:
     """
     Node: Search for activities
     
-    Executes ActivityAgent to find and recommend things to do.
-    Updates state with activity options and recommendations.
+    Searches for activities and uses AI to recommend a diverse itinerary.
     """
     print("\n" + "=" * 70)
     print("🎯 GRAPH NODE: Finding activities...")
     print("=" * 70)
     
     try:
-        agent = ActivityAgent()
+        activity_tool = ActivitySearchTool()
         
-        results = await agent.execute({
-            "destination": state["destination"],
-            "interests": state["interests"],
-            "days": state["days"],
-            "budget": (state["budget"] * 0.15) if state.get("budget") else None
-        })
+        # Calculate activity budget (15% of total)
+        activity_budget = None
+        if state.get("budget"):
+            activity_budget = state["budget"] * 0.15
+        
+        # Search for activities
+        activities = await activity_tool.search(
+            destination=state["destination"],
+            interests=state.get("interests", []),
+            max_price=activity_budget
+        )
+        
+        # AI analysis
+        days = state["days"]
+        analysis_prompt = f"""Recommend activities for a {days}-day trip to {state["destination"]}:
+
+AVAILABLE ACTIVITIES:
+{format_activities(activities)}
+
+USER INTERESTS: {', '.join(state.get('interests', ['general tourism']))}
+BUDGET: ${activity_budget or 'flexible'} total for activities
+
+Recommend the TOP {min(days * 3, 12)} activities. Create a diverse itinerary."""
+        
+        reasoning = await think(ACTIVITY_SYSTEM_PROMPT, analysis_prompt)
+        
+        # Select top activities (3 per day)
+        top_activities = activities[:min(days * 3, 12)]
+        
+        results = {
+            "activities": [a.model_dump() for a in activities],
+            "recommended": [a.model_dump() for a in top_activities],
+            "reasoning": reasoning,
+            "total_found": len(activities)
+        }
         
         print(f"✓ Found {results['total_found']} activity options")
         
-        return {
-            "activities": results
-        }
+        return {"activities": results}
         
     except Exception as e:
         print(f"✗ Error in activity search: {str(e)}")
@@ -139,7 +413,7 @@ async def budget_analysis_node(state: TravelPlanState) -> Dict[str, Any]:
     """
     Node: Analyze budget
     
-    Executes BudgetAgent to calculate costs and check budget constraints.
+    Calculates costs and checks budget constraints.
     Determines if optimization is needed.
     """
     print("\n" + "=" * 70)
@@ -147,29 +421,98 @@ async def budget_analysis_node(state: TravelPlanState) -> Dict[str, Any]:
     print("=" * 70)
     
     try:
-        agent = BudgetAgent()
+        flights_data = state.get("flights", {})
+        hotels_data = state.get("hotels", {})
+        activities_data = state.get("activities", {})
+        total_budget = state.get("budget")
+        travelers = state["travelers"]
+        days = state["days"]
         
-        results = await agent.execute({
-            "flights": state["flights"],
-            "hotels": state["hotels"],
-            "activities": state["activities"],
-            "total_budget": state.get("budget"),
-            "travelers": state["travelers"],
-            "days": state["days"]
-        })
+        # Calculate flight costs
+        flight_cost = 0
+        if flights_data:
+            outbound = flights_data.get("recommended_outbound")
+            return_flight = flights_data.get("recommended_return")
+            if outbound and return_flight:
+                outbound_price = outbound.get("total_price", 0)
+                return_price = return_flight.get("total_price", 0)
+                flight_cost = (outbound_price + return_price) * travelers
         
-        total_cost = results["total_cost"]
-        within_budget = results["within_budget"]
+        # Calculate hotel costs
+        hotel_cost = 0
+        if hotels_data:
+            hotel = hotels_data.get("recommended")
+            if hotel:
+                hotel_cost = hotel.get("price_per_night", 0) * days
+        
+        # Calculate activity costs
+        activity_cost = 0
+        recommended_activities = activities_data.get("recommended", [])
+        for activity in recommended_activities:
+            activity_cost += activity.get("price", 0)
+        
+        # Estimate additional costs
+        estimated_daily_expenses = 100  # $100 per day for meals, transport, misc
+        misc_cost = estimated_daily_expenses * days * travelers
+        
+        total_cost = flight_cost + hotel_cost + activity_cost + misc_cost
+        
+        # Create breakdown
+        breakdown = {
+            "flights": flight_cost,
+            "hotels": hotel_cost,
+            "activities": activity_cost,
+            "meals_and_misc": misc_cost,
+            "total": total_cost,
+            "budget": total_budget,
+            "remaining": (total_budget - total_cost) if total_budget else None,
+            "within_budget": total_cost <= total_budget if total_budget else True
+        }
+        
+        within_budget = breakdown["within_budget"]
+        
+        # AI analysis
+        budget_text = f"${total_budget:,.2f}" if total_budget else "No limit"
+        status_text = ""
+        if total_budget:
+            if total_cost > total_budget:
+                status_text = f"OVER BUDGET by ${total_cost - total_budget:,.2f}"
+            else:
+                status_text = "WITHIN BUDGET ✓"
+        
+        analysis_prompt = f"""Analyze this trip budget:
+
+COST BREAKDOWN:
+- Flights: ${flight_cost:,.2f} ({travelers} travelers)
+- Hotels: ${hotel_cost:,.2f} ({days} nights)
+- Activities: ${activity_cost:,.2f}
+- Meals & Misc: ${misc_cost:,.2f} (estimated)
+- TOTAL: ${total_cost:,.2f}
+
+TARGET BUDGET: {budget_text}
+{status_text}
+
+Provide brief analysis: Is this good value? Any suggestions to optimize?"""
+        
+        reasoning = await think(BUDGET_SYSTEM_PROMPT, analysis_prompt)
+        
+        results = {
+            "breakdown": breakdown,
+            "reasoning": reasoning,
+            "within_budget": within_budget,
+            "total_cost": total_cost,
+            "budget_status": "over" if not within_budget else "within"
+        }
         
         print(f"✓ Total cost: ${total_cost:,.2f}")
-        if state.get("budget"):
+        if total_budget:
             status = "Within budget ✓" if within_budget else "Over budget ✗"
             print(f"  {status}")
         
         # Determine if we need optimization
         needs_optimization = False
-        if state.get("budget") and not within_budget:
-            if state["optimization_iteration"] < 3:  # Max 3 optimization attempts
+        if total_budget and not within_budget:
+            if state["optimization_iteration"] < 3:
                 needs_optimization = True
                 print("  → Will attempt to optimize costs")
         
@@ -201,19 +544,15 @@ async def generate_summary_node(state: TravelPlanState) -> Dict[str, Any]:
     print("=" * 70)
     
     try:
-        # Use a base agent for summary generation
-        agent = BaseAgent.__new__(BaseAgent)
-        agent.__init__(
-            name="Summary Generator",
-            description="Creates engaging trip summaries"
-        )
-        
         # Get recommended options
         hotel = state["hotels"].get("recommended", {})
         hotel_name = hotel.get("name", "Unknown Hotel")
         hotel_price = hotel.get("price_per_night", 0)
         
         num_activities = len(state["activities"].get("recommended", []))
+        
+        budget_analysis = state.get("budget_analysis", {})
+        breakdown = budget_analysis.get("breakdown", {})
         
         summary_prompt = f"""Create an engaging trip summary for this travel plan:
 
@@ -222,7 +561,7 @@ DURATION: {state['days']} days
 TRAVELERS: {state['travelers']}
 
 SELECTED OPTIONS:
-- Flights: ${state['budget_analysis']['breakdown']['flights']:,.2f}
+- Flights: ${breakdown.get('flights', 0):,.2f}
 - Hotel: {hotel_name} - ${hotel_price}/night
 - Activities: {num_activities} curated experiences
 - Total Cost: ${state['total_cost']:,.2f}
@@ -232,13 +571,11 @@ USER INTERESTS: {', '.join(state['interests']) if state['interests'] else 'Gener
 Create an exciting 5-7 sentence summary that highlights why this is a perfect trip plan.
 Make it engaging and mention specific highlights."""
         
-        summary = await agent.think(summary_prompt)
+        summary = await think(SUMMARY_SYSTEM_PROMPT, summary_prompt)
         
         print("✓ Trip summary generated")
         
-        return {
-            "trip_summary": summary
-        }
+        return {"trip_summary": summary}
         
     except Exception as e:
         print(f"✗ Error generating summary: {str(e)}")

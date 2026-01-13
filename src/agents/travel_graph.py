@@ -3,10 +3,6 @@ LangGraph Travel Planning Workflow
 Defines the complete graph structure for the agentic travel planner.
 """
 from langgraph.graph import StateGraph, END
-import sys
-from pathlib import Path
-
-sys.path.append(str(Path(__file__).parent.parent.parent))
 
 from src.agents.state import TravelPlanState
 from src.agents.graph_nodes import (
