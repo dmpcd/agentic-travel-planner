@@ -7,60 +7,15 @@ This file contains ALL the agent logic directly in the node functions,
 eliminating the need for separate agent class files.
 """
 from typing import Dict, Any, List
-import os
-from dotenv import load_dotenv
-from langchain_openai import ChatOpenAI
-from langchain_core.messages import HumanMessage, SystemMessage
 
 from src.agents.state import TravelPlanState
+from src.agents.llm_utils import get_llm, think  # Import shared LLM utilities
 from src.tools.flight_search import FlightSearchTool
 from src.tools.hotel_search import HotelSearchTool
 from src.tools.activity_search import ActivitySearchTool
 from src.models.flight import Flight
 from src.models.hotel import Hotel
 from src.models.activity import Activity
-
-# Load environment variables
-load_dotenv()
-
-
-# ============================================
-# LLM HELPER - Shared across all nodes
-# ============================================
-
-def get_llm(temperature: float = 0.7) -> ChatOpenAI:
-    """Get a configured LLM instance using Perplexity API"""
-    api_key = os.getenv("PERPLEXITY_API_KEY")
-    if not api_key:
-        raise ValueError("PERPLEXITY_API_KEY not found in .env file!")
-    
-    return ChatOpenAI(
-        model="sonar",
-        temperature=temperature,
-        openai_api_key=api_key,
-        openai_api_base="https://api.perplexity.ai"
-    )
-
-
-async def think(system_prompt: str, user_message: str) -> str:
-    """
-    Send a message to the LLM and get a response.
-    This is the shared "thinking" capability for all nodes.
-    
-    Args:
-        system_prompt: The system instructions for the LLM
-        user_message: The question or task for the LLM
-        
-    Returns:
-        The LLM's response as a string
-    """
-    llm = get_llm()
-    messages = [
-        SystemMessage(content=system_prompt),
-        HumanMessage(content=user_message)
-    ]
-    response = await llm.ainvoke(messages)
-    return response.content
 
 
 # ============================================
@@ -302,9 +257,27 @@ async def hotel_search_node(state: TravelPlanState) -> Dict[str, Any]:
         if state.get("budget"):
             max_price_per_night = state["budget"] * 0.35 / state["days"]
         
+        # Determine hotel search location
+        # If user specified a location preference (e.g., "close to Galle"), extract it
+        hotel_location = state["destination"]
+        hotel_prefs = state.get('hotel_preferences', '')
+        if hotel_prefs:
+            # Extract city names from preferences like "close to Galle", "near Kandy", "in Hikkaduwa"
+            location_keywords = ['close to', 'near', 'in ', 'around', 'by ']
+            prefs_lower = hotel_prefs.lower()
+            for keyword in location_keywords:
+                if keyword in prefs_lower:
+                    # Extract the city name after the keyword
+                    idx = prefs_lower.find(keyword) + len(keyword)
+                    potential_city = hotel_prefs[idx:].strip().split()[0] if idx < len(hotel_prefs) else ''
+                    if potential_city and len(potential_city) > 2:
+                        hotel_location = potential_city
+                        print(f"📍 Using hotel preference location: {hotel_location}")
+                        break
+        
         # Search for hotels
         hotels = await hotel_tool.search(
-            destination=state["destination"],
+            destination=hotel_location,
             check_in=state["departure_date"],
             check_out=state["return_date"],
             guests=state["travelers"],
@@ -349,6 +322,7 @@ async def activity_search_node(state: TravelPlanState) -> Dict[str, Any]:
     Node: Search for activities
     
     Searches for activities and uses AI to recommend a diverse itinerary.
+    Uses hotel_preferences location for more accurate results.
     """
     print("\n" + "=" * 70)
     print("🎯 GRAPH NODE: Finding activities...")
@@ -362,10 +336,37 @@ async def activity_search_node(state: TravelPlanState) -> Dict[str, Any]:
         if state.get("budget"):
             activity_budget = state["budget"] * 0.15
         
+        # Extract specific location from hotel_preferences for beach/activity-focused trips
+        activity_location = state["destination"]
+        hotel_prefs = state.get("hotel_preferences", "")
+        interests = state.get("interests", [])
+        
+        # For beach/water activities, use the hotel preference location if available
+        beach_interests = ['beach', 'beaches', 'surfing', 'surf', 'diving', 'snorkeling', 
+                          'corals', 'ocean', 'water sports', 'swimming']
+        has_beach_interests = any(i.lower() in beach_interests for i in interests)
+        
+        if hotel_prefs and has_beach_interests:
+            # Extract city name from hotel preferences
+            import re
+            location_patterns = [
+                r'close to (\w+)',
+                r'near (\w+)',
+                r'in (\w+)',
+                r'around (\w+)',
+                r'(\w+) area',
+            ]
+            for pattern in location_patterns:
+                match = re.search(pattern, hotel_prefs, re.IGNORECASE)
+                if match:
+                    activity_location = f"{match.group(1)}, {state['destination']}"
+                    print(f"📍 Using activity location from preferences: {activity_location}")
+                    break
+        
         # Search for activities
         activities = await activity_tool.search(
-            destination=state["destination"],
-            interests=state.get("interests", []),
+            destination=activity_location,
+            interests=interests,
             max_price=activity_budget
         )
         

@@ -12,6 +12,7 @@ class ActivityCategory(str, Enum):
     SIGHTSEEING = "sightseeing"
     FOOD = "food"
     CULTURE = "culture"
+    NATURE = "nature"
     ADVENTURE = "adventure"
     SHOPPING = "shopping"
     RELAXATION = "relaxation"
