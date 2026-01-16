@@ -27,6 +27,7 @@ class TravelPlanState(TypedDict):
     interests: List[str]
     hotel_preferences: Optional[str]
     flight_preferences: Optional[str]
+    additional_notes: Optional[str]  # User's special requirements or notes
     
     # ============================================
     # AGENT OUTPUTS - Results from each agent
@@ -92,6 +93,7 @@ def create_initial_state(input_data: Dict[str, Any]) -> TravelPlanState:
         interests=input_data.get("interests", []),
         hotel_preferences=input_data.get("hotel_preferences"),
         flight_preferences=input_data.get("flight_preferences"),
+        additional_notes=input_data.get("additional_notes"),
         
         # Initialize agent outputs as empty
         flights={},

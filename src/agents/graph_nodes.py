@@ -258,19 +258,35 @@ async def hotel_search_node(state: TravelPlanState) -> Dict[str, Any]:
             max_price_per_night = state["budget"] * 0.35 / state["days"]
         
         # Determine hotel search location
-        # If user specified a location preference (e.g., "close to Galle"), extract it
         hotel_location = state["destination"]
         hotel_prefs = state.get('hotel_preferences', '')
+        
+        # Words that should NOT be treated as city names
+        non_city_words = {
+            'beach', 'beaches', 'center', 'centre', 'downtown', 'airport', 
+            'station', 'ocean', 'sea', 'mountain', 'lake', 'river', 'pool',
+            'spa', 'resort', 'city', 'town', 'area', 'zone', 'district',
+            'market', 'mall', 'park', 'garden', 'temple', 'church', 'mosque'
+        }
+        
         if hotel_prefs:
-            # Extract city names from preferences like "close to Galle", "near Kandy", "in Hikkaduwa"
-            location_keywords = ['close to', 'near', 'in ', 'around', 'by ']
-            prefs_lower = hotel_prefs.lower()
-            for keyword in location_keywords:
-                if keyword in prefs_lower:
-                    # Extract the city name after the keyword
-                    idx = prefs_lower.find(keyword) + len(keyword)
-                    potential_city = hotel_prefs[idx:].strip().split()[0] if idx < len(hotel_prefs) else ''
-                    if potential_city and len(potential_city) > 2:
+            # Extract city names from preferences like "close to Galle", "near Kandy"
+            import re
+            location_patterns = [
+                r'close to (\w+)',
+                r'near (\w+)',
+                r'in (\w+)',
+                r'around (\w+)',
+                r'by (\w+)',
+            ]
+            for pattern in location_patterns:
+                match = re.search(pattern, hotel_prefs, re.IGNORECASE)
+                if match:
+                    potential_city = match.group(1).strip()
+                    # Only use if it's not a generic word and is likely a city name
+                    if (potential_city.lower() not in non_city_words 
+                        and len(potential_city) > 2 
+                        and potential_city[0].isupper()):
                         hotel_location = potential_city
                         print(f"📍 Using hotel preference location: {hotel_location}")
                         break
@@ -341,6 +357,14 @@ async def activity_search_node(state: TravelPlanState) -> Dict[str, Any]:
         hotel_prefs = state.get("hotel_preferences", "")
         interests = state.get("interests", [])
         
+        # Words that should NOT be treated as city names
+        non_city_words = {
+            'beach', 'beaches', 'center', 'centre', 'downtown', 'airport', 
+            'station', 'ocean', 'sea', 'mountain', 'lake', 'river', 'pool',
+            'spa', 'resort', 'city', 'town', 'area', 'zone', 'district',
+            'market', 'mall', 'park', 'garden', 'temple', 'church', 'mosque'
+        }
+        
         # For beach/water activities, use the hotel preference location if available
         beach_interests = ['beach', 'beaches', 'surfing', 'surf', 'diving', 'snorkeling', 
                           'corals', 'ocean', 'water sports', 'swimming']
@@ -359,9 +383,14 @@ async def activity_search_node(state: TravelPlanState) -> Dict[str, Any]:
             for pattern in location_patterns:
                 match = re.search(pattern, hotel_prefs, re.IGNORECASE)
                 if match:
-                    activity_location = f"{match.group(1)}, {state['destination']}"
-                    print(f"📍 Using activity location from preferences: {activity_location}")
-                    break
+                    potential_city = match.group(1).strip()
+                    # Only use if it's a real city name (capitalized, not a generic word)
+                    if (potential_city.lower() not in non_city_words 
+                        and len(potential_city) > 2
+                        and potential_city[0].isupper()):
+                        activity_location = f"{potential_city}, {state['destination']}"
+                        print(f"📍 Using activity location from preferences: {activity_location}")
+                        break
         
         # Search for activities
         activities = await activity_tool.search(
@@ -555,6 +584,10 @@ async def generate_summary_node(state: TravelPlanState) -> Dict[str, Any]:
         budget_analysis = state.get("budget_analysis", {})
         breakdown = budget_analysis.get("breakdown", {})
         
+        # Include additional user notes if provided
+        additional_notes = state.get("additional_notes", "")
+        notes_section = f"\nSPECIAL REQUIREMENTS/NOTES: {additional_notes}" if additional_notes else ""
+        
         summary_prompt = f"""Create an engaging trip summary for this travel plan:
 
 DESTINATION: {state['destination']}
@@ -567,10 +600,10 @@ SELECTED OPTIONS:
 - Activities: {num_activities} curated experiences
 - Total Cost: ${state['total_cost']:,.2f}
 
-USER INTERESTS: {', '.join(state['interests']) if state['interests'] else 'General tourism'}
+USER INTERESTS: {', '.join(state['interests']) if state['interests'] else 'General tourism'}{notes_section}
 
 Create an exciting 5-7 sentence summary that highlights why this is a perfect trip plan.
-Make it engaging and mention specific highlights."""
+Make it engaging and mention specific highlights. If there are special requirements/notes, address how this plan meets them."""
         
         summary = await think(SUMMARY_SYSTEM_PROMPT, summary_prompt)
         
